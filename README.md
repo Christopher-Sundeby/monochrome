@@ -1,3 +1,4 @@
+
  
  <p align="center">
   <a href="https://monochrome.tf">
@@ -92,6 +93,23 @@
 ### Power User Features
 
 - Keyboard shortcuts & Command Palette (CTRL+K) for power users
+
+### Android
+ - I have added support of a seamless experience on the android app with full offline compatibility (WIP)
+ -  fixes
+ - updateMediaSession covert art for offline
+     -  - covert art for offline in app controler
+- Installation guid for android
+1. make sure that you have [Android Studio](https://developer.android.com/studio) installed
+2. go to the root directory of the project
+3. `bun install`
+4. `bun build`
+5. `bunx cap sync android`
+6. `bunx cap open android`
+7. connecte your android divice with USB Debugging on and click run
+
+###### disclaimer all the featers that I have added are vide codded it's juste that it works greate for me and I wanted to share it with you and It's is not very well optimised but it should not cause any problems
+###### feel free to make comits to add new featurs or to fix bugges 
 
 ---
 
@@ -233,44 +251,3 @@ To sync your library, history, and playlists across devices:
 1. Click the "Accounts" Section
 2. Sign in with Google or Email
 3. Your data will automatically sync across all devices
-
----
-
-## Contributing
-
-We welcome contributions from the community! Please see our [Contributing Guide](CONTRIBUTING.md) for:
-
-- Setting up your development environment
-- Code style and linting
-- Project structure
-- Before You Contribute
-- Commit message conventions
-- Deployment information
-
----
-
-<p align="center">
-  <a href="https://fmhy.net/audio#streaming-sites">
-    <img src="https://raw.githubusercontent.com/monochrome-music/monochrome/refs/heads/main/public/assets/asseenonfmhy880x310.png" alt="As seen on FMHY" height="50">
-  </a>
-</p>
-
-<p align="center">
-  <a href="https://notbyai.fyi">
-    <img src="https://i.samidy.xyz/Developed-By-Humans-Not-By-AI-Badge-black%402x.png" alt="Developed by Humans" height="50">
-  </a>
-</p>
-
-<p align="center">
-  Made with ❤️ by the Monochrome team
-</p>
-
-## Star History
-
-<a href="https://www.star-history.com/#monochrome-music/monochrome&type=date&logscale&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=monochrome-music/monochrome&type=date&theme=dark&logscale&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=monochrome-music/monochrome&type=date&logscale&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=monochrome-music/monochrome&type=date&logscale&legend=top-left" />
- </picture>
-</a>
