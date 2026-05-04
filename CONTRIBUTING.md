@@ -1,3 +1,4 @@
+
 # Contributing to Monochrome
 
 Thank you for your interest in contributing to Monochrome! This guide will help you get started with development, understand our codebase, and follow our contribution workflow.
@@ -150,11 +151,9 @@ Whether you've spoken with us or not, we highly recommend opening **Draft Pull R
 
 #### Prohibited (AI Slop):
 
-- **Vibecoding** the entire PR (letting AI write the code without human oversight).
 - Submitting code you don't actually understand or haven't tested.
 - Ignoring edge cases because the AI didn't suggest them.
-
-> :warning:: If we can verify that a Pull Request is just unvetted AI/Vibecoded Work, **it will be automatically closed without review.** If you can't explain your code, it doesn't belong in Monochrome.
+- even tho I vide codded it I have made sure that it works so please do the same
 
 ### No Hard Feelings
 
