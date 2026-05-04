@@ -24,7 +24,6 @@ export function triggerDownload(blob: Blob, filename: string): void {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
 }
-
 /**
  * Apply post-processing to an audio Blob according to the requested quality.
  *

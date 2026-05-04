@@ -21,6 +21,7 @@ import { BulkDownloadMethod, modernSettings } from './ModernSettings.js';
 import { SVG_CLOSE } from './icons.ts';
 import { MusicAPI } from './music-api.js';
 import { LyricsManager } from './lyrics.js';
+import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 
 const downloadTasks = new Map();
 const bulkDownloadTasks = new Map();
@@ -31,6 +32,317 @@ let downloadNotificationContainer = null;
 async function* singleWriterEntry(entry) {
     yield entry;
 }
+
+function isCapacitorAndroid() {
+    return (
+        typeof window !== 'undefined' &&
+        !!window.Capacitor &&
+        typeof window.Capacitor.getPlatform === 'function' &&
+        window.Capacitor.getPlatform() === 'android'
+    );
+}
+
+function blobToBase64(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+
+        reader.onerror = reject;
+
+        reader.onload = () => {
+            const result = reader.result;
+            const base64 = String(result).split(',')[1];
+            resolve(base64);
+        };
+
+        reader.readAsDataURL(blob);
+    });
+}
+
+function safeFileName(name) {
+    return String(name || 'track.flac')
+        .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+        .trim();
+}
+
+function getAndroidCoverPathForTrackId(trackId) {
+    return `monochrome/covers/${safeFileName(String(trackId))}.png`;
+}
+
+async function ensureAndroidCoverFolder() {
+    try {
+        await Filesystem.mkdir({
+            path: 'monochrome/covers',
+            directory: Directory.Data,
+            recursive: true,
+        });
+    } catch (error) {
+        // Folder may already exist. Ignore.
+    }
+}
+
+function findCoverIdFromTrack(track) {
+    return (
+        track?.album?.cover ||
+        track?.album?.image ||
+        track?.album?.coverId ||
+        track?.cover ||
+        track?.image ||
+        track?.coverId ||
+        ''
+    );
+}
+
+async function saveAndroidCoverForTrack(track, api = null) {
+    if (!track?.id) {
+        console.warn('[android-cover] Missing track id, cannot save cover');
+        return '';
+    }
+
+    await ensureAndroidCoverFolder();
+
+    const coverId = findCoverIdFromTrack(track);
+
+    console.log('[android-cover] cover lookup:', {
+        trackId: track.id,
+        title: track.title || track.name,
+        coverId,
+        albumCover: track.album?.cover,
+        albumImage: track.album?.image,
+        cover: track.cover,
+        image: track.image,
+        hasApi: !!api,
+        hasApiGetCoverUrl: !!api?.getCoverUrl,
+    });
+
+    if (!coverId) {
+        console.warn('[android-cover] No cover id found for track:', track.id);
+        return '';
+    }
+
+    try {
+        const coverBlob = await getCoverBlob(api, coverId);
+
+        if (!coverBlob || coverBlob.size === 0) {
+            console.warn('[android-cover] Empty cover blob for track:', track.id, coverId);
+            return '';
+        }
+
+        const coverBase64 = await blobToBase64(coverBlob);
+        const coverPath = getAndroidCoverPathForTrackId(track.id);
+
+        await Filesystem.writeFile({
+            path: coverPath,
+            data: coverBase64,
+            directory: Directory.Data,
+            recursive: true,
+        });
+
+        console.log('[android-cover] Saved cover:', {
+            coverPath,
+            size: coverBlob.size,
+            type: coverBlob.type,
+        });
+
+        return coverPath;
+    } catch (error) {
+        console.warn('[android-cover] Failed to save cover for track:', track.id, error);
+        return '';
+    }
+}
+
+
+async function saveAndroidDownload(blob, filename, track = null, api = null) {
+    const cleanName = safeFileName(filename);
+    const filePath = `monochrome/${cleanName}`;
+
+    const base64Data = await blobToBase64(blob);
+
+    const result = await Filesystem.writeFile({
+        path: filePath,
+        data: base64Data,
+        directory: Directory.Data,
+        recursive: true,
+    });
+
+    console.log('[android-download] Saved file:', result.uri);
+
+    function blobToDataUrl(blob) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+
+            reader.onerror = reject;
+            reader.onload = () => resolve(String(reader.result));
+
+            reader.readAsDataURL(blob);
+        });
+    }
+
+    function isDirectUrl(value) {
+        return (
+            typeof value === 'string' &&
+            (
+                value.startsWith('http://') ||
+                value.startsWith('https://') ||
+                value.startsWith('data:') ||
+                value.startsWith('blob:') ||
+                value.startsWith('file:') ||
+                value.startsWith('/')
+            )
+        );
+    }
+
+    function getTrackCoverUrlForDownload(track, api) {
+        const directCover =
+            track.coverUrl ||
+            track.album?.coverUrl ||
+            track.album?.imageUrl ||
+            '';
+
+        if (isDirectUrl(directCover)) {
+            return directCover;
+        }
+
+        const coverId =
+            track.image ||
+            track.cover ||
+            track.album?.cover ||
+            track.album?.image ||
+            '';
+
+        if (!coverId) {
+            return '';
+        }
+
+        if (isDirectUrl(coverId)) {
+            return coverId;
+        }
+
+        if (api && typeof api.getCoverUrl === 'function') {
+            return api.getCoverUrl(coverId);
+        }
+
+        return '';
+    }
+
+    async function saveAndroidCover(track, api, safeTrackId) {
+        try {
+            const coverUrl = getTrackCoverUrlForDownload(track, api);
+
+            if (!coverUrl) {
+                return '';
+            }
+
+            const response = await fetch(coverUrl);
+
+            if (!response.ok) {
+                return '';
+            }
+
+            const coverBlob = await response.blob();
+            const base64Data = await blobToBase64(coverBlob);
+
+            const ext = coverBlob.type && coverBlob.type.includes('png') ? 'png' : 'jpg';
+            const coverPath = `monochrome/covers/${safeTrackId}.${ext}`;
+
+            await Filesystem.writeFile({
+                path: coverPath,
+                data: base64Data,
+                directory: Directory.Data,
+                recursive: true,
+            });
+
+            console.log('[android-download] Saved cover:', coverPath);
+
+            return coverPath;
+        } catch (error) {
+            console.warn('[android-download] Could not save cover:', error);
+            return '';
+        }
+    }
+
+    async function getCoverDataUrlForTrack(track) {
+        try {
+            const coverUrl =
+                track.coverUrl ||
+                track.album?.coverUrl ||
+                track.image ||
+                track.cover ||
+                track.album?.cover ||
+                '';
+
+            if (!coverUrl) return '';
+
+            const finalCoverUrl =
+                coverUrl.startsWith('http') || coverUrl.startsWith('/')
+                    ? coverUrl
+                    : MusicAPI.instance?.getCoverUrl
+                    ? MusicAPI.instance.getCoverUrl(coverUrl)
+                    : '';
+
+            if (!finalCoverUrl) return '';
+
+            const response = await fetch(finalCoverUrl);
+            const blob = await response.blob();
+
+            return await blobToDataUrl(blob);
+        } catch (error) {
+            console.warn('[android-download] Could not save cover data:', error);
+            return '';
+        }
+    }
+
+    if (track?.id) {
+        let coverPath = '';
+
+        try {
+            coverPath = await saveAndroidCoverForTrack(track, api);
+        } catch (coverError) {
+            console.warn('[android-cover] Ignoring cover error:', coverError);
+        }
+
+        try {
+            const safeTrackId = safeFileName(String(track.id));
+            const coverPath = await saveAndroidCover(track, api, safeTrackId);
+
+            const metadata = {
+                trackId: String(track.id),
+                path: filePath,
+                filename: cleanName,
+                title: track.title || track.name || '',
+                artist:
+                    track.artist?.name ||
+                    track.artists?.map((artist) => artist.name).join(', ') ||
+                    '',
+                album: track.album?.title || '',
+                coverPath,
+                coverUrl:
+                    track.coverUrl ||
+                    track.album?.coverUrl ||
+                    track.image ||
+                    track.cover ||
+                    track.album?.cover ||
+                    '',
+                downloadedAt: Date.now(),
+            };
+
+            await Filesystem.writeFile({
+                path: `monochrome/meta/${safeTrackId}.json`,
+                data: JSON.stringify(metadata),
+                directory: Directory.Data,
+                encoding: Encoding.UTF8,
+                recursive: true,
+            });
+
+            console.log('[android-download] Saved metadata:', metadata);
+        } catch (metadataError) {
+            console.warn('[android-download] Metadata save failed, but audio file was saved:', metadataError);
+        }
+    }
+
+    return result.uri;
+}
+
+
 
 async function createDiscLayoutContext(tracks, api) {
     if (!playlistSettings.shouldSeparateDiscsInZip()) {
@@ -1069,15 +1381,39 @@ export async function downloadTrackWithMetadata(
         addDownloadTask(track.id, enrichedTrack, filename, api, controller);
 
         // Download the blob (metadata already applied inside downloadTrack)
+        const androidApp = isCapacitorAndroid();
+
         const blob = await api.downloadTrack(track.id, quality, filename, {
             signal: controller.signal,
-            track: enrichedTrack,
             onProgress: (progress) => {
                 updateDownloadProgress(track.id, progress);
             },
-            calculateDashBytes: true,
             triggerDownload: false,
         });
+
+        if (androidApp) {
+            const savedUri = await saveAndroidDownload(
+                blob,
+                filename,
+                {
+                    ...enrichedTrack,
+                    id: track.id,
+                },
+                api
+            );
+
+            completeDownloadTask(track.id, true);
+            showNotification('Downloaded inside app storage');
+
+            console.log('[android-download] File saved at:', savedUri);
+            return;
+        }
+
+        if (isCapacitorAndroid) {
+            completeDownloadTask(track.id, true);
+            showNotification('Download started. Check your Android downloads.');
+            return;
+}
 
         const finalFilename = buildTrackFilename(track, quality, await getExtensionFromBlob(blob))
             .split('/')
@@ -1146,4 +1482,113 @@ export async function downloadLikedTracks(tracks, api, quality, _lyricsManager =
         name: 'Liked Tracks',
         api,
     });
+}
+
+export async function getAndroidDownloadForTrack(track) {
+    console.log('[offline-check] checking track:', {
+        id: track?.id,
+        title: track?.title || track?.name,
+        type: track?.type,
+    });
+
+    if (!isCapacitorAndroid() || !track?.id) {
+        console.log('[offline-check] skipped, not android or missing id');
+        return null;
+    }
+
+    try {
+        const safeTrackId = safeFileName(String(track.id));
+        const metadataPath = `monochrome/meta/${safeTrackId}.json`;
+
+        console.log('[offline-check] reading metadata:', metadataPath);
+
+        const metadataFile = await Filesystem.readFile({
+            path: metadataPath,
+            directory: Directory.Data,
+            encoding: Encoding.UTF8,
+        });
+
+        console.log('[offline-check] metadata raw:', metadataFile.data);
+
+        const metadata = JSON.parse(metadataFile.data);
+
+        await Filesystem.stat({
+            path: metadata.path,
+            directory: Directory.Data,
+        });
+
+        const audioUriResult = await Filesystem.getUri({
+            path: metadata.path,
+            directory: Directory.Data,
+        });
+
+        let coverUri = '';
+
+        if (metadata.coverPath) {
+            try {
+                await Filesystem.stat({
+                    path: metadata.coverPath,
+                    directory: Directory.Data,
+                });
+
+                const coverUriResult = await Filesystem.getUri({
+                    path: metadata.coverPath,
+                    directory: Directory.Data,
+                });
+
+                coverUri = coverUriResult.uri;
+            } catch (error) {
+                console.warn('[android-download] Cover file missing:', error);
+            }
+        }
+
+        console.log('[offline-check] found local download:', {
+            trackId: metadata.trackId,
+            path: metadata.path,
+            uri: audioUriResult.uri,
+            coverUri,
+        });
+
+        return {
+            ...metadata,
+            uri: audioUriResult.uri,
+            coverUri,
+        };
+    } catch (error) {
+        console.warn('[offline-check] no local download found:', error);
+        return null;
+    }
+}
+
+export async function listAndroidDownloads() {
+    if (!isCapacitorAndroid()) {
+        return [];
+    }
+
+    try {
+        const result = await Filesystem.readdir({
+            path: 'monochrome',
+            directory: Directory.Data,
+        });
+
+        return result.files
+            .filter((file) => file.name.toLowerCase().endsWith('.flac'))
+            .map((file) => ({
+                name: file.name,
+                path: `monochrome/${file.name}`,
+                uri: file.uri,
+            }));
+    } catch (error) {
+        console.warn('[android-download] Could not list downloads', error);
+        return [];
+    }
+}
+
+export async function getAndroidDownloadUri(path) {
+    const result = await Filesystem.getUri({
+        path,
+        directory: Directory.Data,
+    });
+
+    return result.uri;
 }

@@ -87,6 +87,35 @@ if (typeof window !== 'undefined') {
     window.plausible.init();
 }
 
+//temp
+
+import { listAndroidDownloads, getAndroidDownloadUri } from './downloads.js';
+import { playNativeAudio, pauseNativeAudio, stopNativeAudio } from './native-audio.js';
+
+window.playFirstAndroidDownload = async function () {
+    const files = await listAndroidDownloads();
+
+    if (!files.length) {
+        alert('No Android downloads found');
+        return;
+    }
+
+    const uri = await getAndroidDownloadUri(files[0].path);
+
+    console.log('[native-audio] playing:', uri);
+
+    await playNativeAudio(uri);
+};
+
+window.pauseNativeAudioTest = async function () {
+    await pauseNativeAudio();
+};
+
+window.stopNativeAudioTest = async function () {
+    await stopNativeAudio();
+};
+//TEMP
+
 // Lazy-loaded modules
 let settingsModule = null;
 let downloadsModule = null;

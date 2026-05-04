@@ -24,3 +24,40 @@ package-lock.json
 # Q-DL Files
 qobuz-api
 Qobuz-DL
+# Capacitor generated web assets
+android/app/src/main/assets/public/
+
+# Android / Gradle generated files
+android/.gradle/
+android/build/
+android/app/build/
+android/captures/
+android/local.properties
+
+# Android Studio project cache
+android/.idea/
+android/*.iml
+android/app/*.iml
+
+# Signing / release secrets
+*.jks
+*.keystore
+*.pem
+*.p12
+key.properties
+release.properties
+
+# APK / AAB outputs
+*.apk
+*.aab
+
+# More build/cache folders
+build/
+.cache/
+.tmp/
+.temp/
+
+# OS / editor
+Thumbs.db
+.vscode/
+.idea/

@@ -1,3 +1,14 @@
+import { getAndroidDownloadForTrack } from './downloads.js';
+import {
+    isAndroidApp,
+    playNativeAudio,
+    pauseNativeAudio,
+    resumeNativeAudio,
+    stopNativeAudio,
+    seekNativeAudio,
+    getNativeAudioStatus,
+    addNativeAudioEndedListener,
+} from './native-audio.js';
 import {
     REPEAT_MODE,
     formatTime,
@@ -29,6 +40,8 @@ import { SVG_CLOCK, SVG_ATMOS } from './icons.js';
 import { UIRenderer } from './ui.js';
 import { MediaSession } from '@capgo/capacitor-media-session';
 
+console.log('[BUILD-CHECK] player.js loaded - native offline test v1');
+
 export class Player {
     static #instance = null;
 
@@ -57,6 +70,10 @@ export class Player {
         this.preloadAbortController = null;
         this.currentTrack = null;
         this.currentRgValues = null;
+        this.nativeAudioActive = false;
+        this.nativeAudioPaused = true;
+        this.nativeAudioProgressTimer = null;
+        this.nativeAudioEndedListener = null;
         this.userVolume = parseFloat(localStorage.getItem('volume') || '0.7');
         this.isFallbackRetry = false;
         this.isFallbackInProgress = false;
@@ -80,6 +97,31 @@ export class Player {
             hasMore: true,
         };
     }
+
+    createOfflineMediaSessionTrack(track, offlineDownload) {
+        const coverUrl =
+            offlineDownload?.coverUri ||
+            offlineDownload?.coverUrl ||
+            track.coverUrl ||
+            track.album?.coverUrl ||
+            track.image ||
+            track.cover ||
+            track.album?.cover ||
+            '';
+
+        return {
+            ...track,
+            mediaSessionCoverUrl: coverUrl,
+            offlineCoverUrl: coverUrl,
+            coverUrl,
+            album: {
+                ...(track.album || {}),
+                coverUrl,
+                cover: coverUrl,
+                image: coverUrl,
+            },
+        };
+}
 
     static async initialize(audioElement, api, quality) {
         if (Player.#instance) {
@@ -458,27 +500,55 @@ export class Player {
 
     async setupMediaSession() {
         const setHandlers = async () => {
+            await MediaSession.setActionHandler({ action: 'pause' }, async () => {
+                if (this.nativeAudioActive) {
+                    await pauseNativeAudio();
+
+                    this.nativeAudioPaused = true;
+
+                    this.audio.dispatchEvent(new Event('pause'));
+
+                    await this.updateMediaSessionPlaybackState();
+                    await this.updateMediaSessionPositionState();
+
+                    return;
+                }
+
+                this.activeElement.pause();
+
+                await this.updateMediaSessionPlaybackState();
+                await this.updateMediaSessionPositionState();
+            });
             await MediaSession.setActionHandler({ action: 'play' }, async () => {
+                if (this.nativeAudioActive) {
+                    await resumeNativeAudio();
+
+                    this.nativeAudioPaused = false;
+
+                    this.audio.dispatchEvent(new Event('play'));
+                    this.audio.dispatchEvent(new Event('playing'));
+
+                    await this.updateMediaSessionPlaybackState();
+                    await this.updateMediaSessionPositionState();
+
+                    return;
+                }
+
                 const el = this.activeElement;
-                // Initialize and resume audio context first (required for iOS lock screen)
-                // Must happen before audio.play() or audio won't route through Web Audio
+
                 if (!audioContextManager.isReady()) {
                     audioContextManager.init(el);
                     this.applyReplayGain();
                 }
+
                 await audioContextManager.resume();
 
                 try {
                     await el.play();
                 } catch (e) {
                     console.error('MediaSession play failed:', e);
-                    // If play fails, try to handle it like a regular play/pause
                     await this.handlePlayPause();
                 }
-            });
-
-            await MediaSession.setActionHandler({ action: 'pause' }, () => {
-                this.activeElement.pause();
             });
 
             await MediaSession.setActionHandler({ action: 'previoustrack' }, async () => {
@@ -512,14 +582,42 @@ export class Player {
                 });
             }
 
-            await MediaSession.setActionHandler({ action: 'seekto' }, (details) => {
-                if (details.seekTime !== undefined) {
-                    this.activeElement.currentTime = Math.max(0, details.seekTime);
-                    this.updateMediaSessionPositionState();
+            await MediaSession.setActionHandler({ action: 'seekto' }, async (details) => {
+                if (details.seekTime === undefined) {
+                    return;
                 }
+
+                const seekTime = Math.max(0, details.seekTime);
+
+                if (this.nativeAudioActive) {
+                    await seekNativeAudio(seekTime);
+                    this.updateMediaSessionPositionState();
+                    return;
+                }
+
+                // ORIGINAL ONLINE BEHAVIOR
+                this.activeElement.currentTime = seekTime;
+                this.updateMediaSessionPositionState();
             });
 
-            await MediaSession.setActionHandler({ action: 'stop' }, () => {
+            await MediaSession.setActionHandler({ action: 'stop' }, async () => {
+                if (this.nativeAudioActive) {
+                    await stopNativeAudio();
+
+                    this.nativeAudioActive = false;
+                    this.nativeAudioPaused = true;
+
+                    this.stopNativeProgressBridge?.();
+
+                    this.audio.dispatchEvent(new Event('pause'));
+
+                    this.updateMediaSessionPlaybackState();
+                    this.updateMediaSessionPositionState();
+
+                    return;
+                }
+
+                // ORIGINAL ONLINE BEHAVIOR
                 this.activeElement.pause();
                 this.activeElement.currentTime = 0;
                 this.updateMediaSessionPlaybackState();
@@ -990,6 +1088,7 @@ export class Player {
     }
 
     async playTrackFromQueue(startTime = 0, recursiveCount = 0, isRetry = false, options = {}) {
+        console.log('[PLAY-CHECK] playTrackFromQueue entered');
         const { preserveGestureToken = false } = options;
         if (!isRetry) {
             this.isFallbackRetry = false;
@@ -1346,6 +1445,39 @@ export class Player {
 
                 await this.safePlay(activeElement);
             } else {
+                // Android offline FLAC: if this audio track is downloaded, play local file with native player.
+                console.log('[offline-check] playTrackFromQueue reached:', {
+                    id: track?.id,
+                    title: track?.title || track?.name,
+                    type: track?.type,
+                });
+
+                if (track && track.type !== 'video') {
+                    const offlineDownload = await this.findOfflineDownloadForTrack(track);
+
+                    console.log('[offline-check] result:', offlineDownload);
+
+                    if (offlineDownload) {
+                        const playedOffline = await this.playOfflineNativeTrack(track, offlineDownload, startTime);
+
+                        if (playedOffline) {
+                            console.log('[native-audio] used downloaded copy instead of web stream:', track.id);
+                            return;
+                        }
+                    }
+                }
+
+                await this.stopNativeAudioIfNeeded();
+
+                this.nativeAudioActive = false;
+                this.nativeAudioPaused = true;
+                this.stopNativeProgressBridge?.();
+
+                // Important: from here we are going back to normal online HTML audio playback.
+                this.nativeAudioActive = false;
+                this.nativeAudioPaused = true;
+                this.stopNativeProgressBridge?.();
+
                 if (
                     shouldPreserveGestureToken &&
                     this.tryStartPreloadedTrackImmediately({
@@ -1359,6 +1491,7 @@ export class Player {
                 ) {
                     return;
                 }
+
 
                 // Tidal: Try to get ReplayGain from manifest first, supplement with track info if needed
                 const streamInfoPromise = this.preloadCache.has(track.id)
@@ -1853,6 +1986,31 @@ export class Player {
 
     playPrev(recursiveCount = 0) {
         const el = this.activeElement;
+
+        if (this.nativeAudioActive) {
+            getNativeAudioStatus()
+                .then(async (status) => {
+                    if ((status.position || 0) > 3) {
+                        await seekNativeAudio(0);
+                    } else if (this.currentQueueIndex > 0) {
+                        await this.stopNativeAudioIfNeeded();
+                        this.currentQueueIndex--;
+
+                        import('./listening-tracker.js')
+                            .then(({ listeningTracker }) => {
+                                listeningTracker.onSkip();
+                                listeningTracker.forceFlush();
+                            })
+                            .catch(() => {});
+
+                        await this.playTrackFromQueue(0, recursiveCount);
+                    }
+                })
+                .catch(console.error);
+
+            return;
+        }
+
         if (el.currentTime > 3) {
             el.currentTime = 0;
             this.updateMediaSessionPositionState();
@@ -1883,12 +2041,176 @@ export class Player {
                 .catch(console.error);
         }
     }
+    async findOfflineDownloadForTrack(track) {
+        if (!isAndroidApp() || !track?.id || track.type === 'video') {
+            return null;
+        }
 
+        return getAndroidDownloadForTrack(track);
+    }
+
+    async stopNativeAudioIfNeeded() {
+        if (!this.nativeAudioActive) {
+            return;
+        }
+
+        try {
+            await stopNativeAudio();
+        } catch (error) {
+            console.warn('[native-audio] stop failed:', error);
+        }
+
+        this.nativeAudioActive = false;
+        this.nativeAudioPaused = true;
+        this.stopNativeProgressBridge();
+
+        this.audio.dispatchEvent(new Event('pause'));
+    }
+
+    startNativeProgressBridge(track) {
+        this.stopNativeProgressBridge();
+
+        this.nativeAudioProgressTimer = setInterval(async () => {
+            if (!this.nativeAudioActive) {
+                return;
+            }
+
+            try {
+                const status = await getNativeAudioStatus();
+
+                const currentTimeEl = document.getElementById('current-time');
+                const totalDurationEl = document.getElementById('total-duration');
+                const progressFill = document.getElementById('progress-fill');
+
+                if (currentTimeEl && typeof status.position === 'number') {
+                    currentTimeEl.textContent = formatTime(status.position);
+                }
+
+                if (totalDurationEl && typeof status.duration === 'number' && status.duration > 0) {
+                    totalDurationEl.textContent = formatTime(status.duration);
+                }
+
+                if (
+                    progressFill &&
+                    typeof status.position === 'number' &&
+                    typeof status.duration === 'number' &&
+                    status.duration > 0
+                ) {
+                    progressFill.style.width = `${(status.position / status.duration) * 100}%`;
+                }
+
+                this.audio.dispatchEvent(new Event('timeupdate'));
+
+                this.updateMediaSessionPlaybackState?.();
+                this.updateMediaSessionPositionState?.();
+
+                if (!status.playing && !this.nativeAudioPaused) {
+                    this.nativeAudioPaused = true;
+                    this.audio.dispatchEvent(new Event('pause'));
+                }
+            } catch (error) {
+                console.warn('[native-audio] status failed:', error);
+            }
+        }, 1000);
+
+        if (!this.nativeAudioEndedListener) {
+            const listener = addNativeAudioEndedListener(async () => {
+                if (!this.nativeAudioActive) {
+                    return;
+                }
+
+                this.nativeAudioActive = false;
+                this.nativeAudioPaused = true;
+                this.stopNativeProgressBridge();
+
+                this.audio.dispatchEvent(new Event('ended'));
+
+                await this.playNext();
+            });
+
+            this.nativeAudioEndedListener = listener;
+        }
+    }
+
+    stopNativeProgressBridge() {
+        if (this.nativeAudioProgressTimer) {
+            clearInterval(this.nativeAudioProgressTimer);
+            this.nativeAudioProgressTimer = null;
+        }
+    }
+
+    async playOfflineNativeTrack(track, offlineDownload, startTime = 0) {
+        if (!offlineDownload?.uri) {
+            return false;
+        }
+
+        const mediaSessionTrack = this.createOfflineMediaSessionTrack(track, offlineDownload);
+
+        console.log('[native-audio] playing offline FLAC:', offlineDownload.uri);
+
+        if (this.shakaInitialized) {
+            try {
+                await this.shakaPlayer.unload();
+                await this.shakaPlayer.detach();
+            } catch {}
+
+            this.shakaInitialized = false;
+        }
+
+        try {
+            this.audio.pause();
+            this.audio.removeAttribute('src');
+            this.audio.load?.();
+        } catch {}
+
+        // Important:
+        // Do NOT call updateNowPlayingUIForTrack here.
+        // playTrackFromQueue already updated the in-app cover correctly.
+        await this.updateMediaSession(mediaSessionTrack);
+
+        await playNativeAudio(offlineDownload.uri, startTime);
+
+        this.nativeAudioActive = true;
+        this.nativeAudioPaused = false;
+
+        this.currentRgValues = null;
+        this.updateAdaptiveQualityBadge?.();
+
+        await this.updateMediaSession(mediaSessionTrack);
+        await this.updateMediaSessionPlaybackState();
+        await this.updateMediaSessionPositionState();
+
+        this.audio.dispatchEvent(new Event('play'));
+        this.audio.dispatchEvent(new Event('playing'));
+
+        this.startNativeProgressBridge(track);
+        this.preloadNextTracks();
+
+        return true;
+    }
     get activeElement() {
         return this.currentTrack?.type === 'video' ? this.video : this.audio;
     }
 
     async handlePlayPause() {
+        if (this.nativeAudioActive) {
+            if (this.nativeAudioPaused) {
+                await resumeNativeAudio();
+                this.nativeAudioPaused = false;
+
+                this.audio.dispatchEvent(new Event('play'));
+                this.audio.dispatchEvent(new Event('playing'));
+            } else {
+                await pauseNativeAudio();
+                this.nativeAudioPaused = true;
+
+                this.audio.dispatchEvent(new Event('pause'));
+                await this.saveQueueState();
+            }
+
+            this.updateMediaSessionPlaybackState?.();
+            return;
+        }
         const el = this.activeElement;
         const hasSource = el.src || el.currentSrc || el.srcObject || this.shakaInitialized;
 
@@ -1914,6 +2236,12 @@ export class Player {
     }
 
     seekBackward(seconds = 10) {
+        if (this.nativeAudioActive) {
+            getNativeAudioStatus()
+                .then((status) => seekNativeAudio(Math.max(0, (status.position || 0) - seconds)))
+                .catch(console.error);
+            return;
+        }
         const el = this.activeElement;
         const newTime = Math.max(0, el.currentTime - seconds);
         el.currentTime = newTime;
@@ -1921,6 +2249,19 @@ export class Player {
     }
 
     seekForward(seconds = 10) {
+        if (this.nativeAudioActive) {
+            getNativeAudioStatus()
+                .then((status) => {
+                    const duration = status.duration || 0;
+                    const target = duration > 0
+                        ? Math.min(duration, (status.position || 0) + seconds)
+                        : (status.position || 0) + seconds;
+
+                    return seekNativeAudio(target);
+                })
+                .catch(console.error);
+            return;
+        }
         const el = this.activeElement;
         const duration = el.duration || 0;
         const newTime = Math.min(duration, el.currentTime + seconds);
@@ -2487,25 +2828,64 @@ export class Player {
     }
 
     updateMediaSession(track) {
-        const coverId = track.album?.cover;
         const trackTitle = getTrackTitle(track);
 
-        // Force a refresh for picky Bluetooth systems by clearing metadata first
+        const isDirectArtworkUrl = (value) => {
+            return (
+                typeof value === 'string' &&
+                (
+                    value.startsWith('http://') ||
+                    value.startsWith('https://') ||
+                    value.startsWith('data:') ||
+                    value.startsWith('blob:') ||
+                    value.startsWith('file:') ||
+                    value.startsWith('content://') ||
+                    value.startsWith('/')
+                )
+            );
+        };
+
+        const coverCandidate =
+            track.mediaSessionCoverUrl ||
+            track.offlineCoverUrl ||
+            track.coverUrl ||
+            track.album?.coverUrl ||
+            track.album?.cover ||
+            track.image ||
+            track.cover ||
+            track.album?.image ||
+            '';
+
+        const coverUrl = isDirectArtworkUrl(coverCandidate)
+            ? coverCandidate
+            : coverCandidate
+            ? this.api.getCoverUrl(coverCandidate, '1280')
+            : '';
+
+        const artwork = coverUrl
+            ? [
+                {
+                    src: coverUrl,
+                    sizes: '1280x1280',
+                    type: 'image/jpeg',
+                },
+            ]
+            : undefined;
+
+        console.log('[media-session-cover]', {
+            trackId: track.id,
+            coverCandidate,
+            coverUrl,
+        });
+
+        // Force a refresh for picky Bluetooth / Android media controllers by clearing metadata first
         MediaSession.setMetadata({})
             .finally(() =>
                 MediaSession.setMetadata({
                     title: trackTitle || 'Unknown Title',
                     artist: getTrackArtists(track) || 'Unknown Artist',
                     album: track.album?.title || 'Unknown Album',
-                    artwork: coverId
-                        ? [
-                              {
-                                  src: this.api.getCoverUrl(coverId, '1280'),
-                                  sizes: '1280x1280',
-                                  type: 'image/jpeg',
-                              },
-                          ]
-                        : undefined,
+                    artwork,
                 })
             )
             .catch(() => {})
@@ -2515,12 +2895,22 @@ export class Player {
             });
     }
 
-    updateMediaSessionPlaybackState() {
-        const isPlaying = !this.activeElement.paused;
-        void MediaSession.setPlaybackState({ playbackState: isPlaying ? 'playing' : 'paused' });
+    async updateMediaSessionPlaybackState() {
+        if (this.nativeAudioActive) {
+            const state = this.nativeAudioPaused ? 'paused' : 'playing';
 
-        // Start/stop Android foreground service to prevent background audio throttling
-        this._updateBackgroundAudioService(isPlaying);
+            await MediaSession.setPlaybackState({
+                playbackState: state,
+            });
+
+            return;
+        }
+
+        const el = this.activeElement;
+
+        await MediaSession.setPlaybackState({
+            playbackState: el.paused ? 'paused' : 'playing',
+        });
     }
 
     /**
@@ -2553,20 +2943,41 @@ export class Player {
         })();
     }
 
-    updateMediaSessionPositionState() {
-        const el = this.activeElement;
-        const duration = el.duration;
+    async updateMediaSessionPositionState() {
+        if (this.nativeAudioActive) {
+            try {
+                const status = await getNativeAudioStatus();
 
-        if (!duration || isNaN(duration) || !isFinite(duration)) {
+                const duration = status.duration || this.currentTrack?.duration || 0;
+                const position = status.position || 0;
+
+                if (!duration || duration <= 0) {
+                    return;
+                }
+
+                await MediaSession.setPositionState({
+                    duration,
+                    position,
+                    playbackRate: 1,
+                });
+
+                return;
+            } catch (error) {
+                console.warn('[native-audio] failed to update media session position:', error);
+                return;
+            }
+        }
+
+        const el = this.activeElement;
+
+        if (!el || !el.duration || isNaN(el.duration) || el.duration <= 0) {
             return;
         }
 
-        MediaSession.setPositionState({
-            duration: duration,
+        await MediaSession.setPositionState({
+            duration: el.duration,
+            position: el.currentTime || 0,
             playbackRate: el.playbackRate || 1,
-            position: Math.min(el.currentTime, duration),
-        }).catch((error) => {
-            console.log('Failed to update Media Session position:', error);
         });
     }
 
@@ -2695,4 +3106,123 @@ export class Player {
         updateBtn(timerBtn);
         updateBtn(timerBtnDesktop);
     }
+
+    updateNowPlayingUIForTrack(track, offlineDownload = null) {
+        if (!track) return;
+
+        const trackTitle = getTrackTitle(track);
+        const trackArtistsHTML = getTrackArtistsHTML(track);
+        const yearDisplay = getTrackYearDisplay(track);
+        const qualityBadge = createQualityBadgeHTML(track);
+
+        const coverId =
+            offlineDownload?.coverId ||
+            track.image ||
+            track.cover ||
+            track.album?.cover ||
+            track.album?.image ||
+            '';
+
+        let coverUrl =
+            offlineDownload?.coverUri ||
+            offlineDownload?.coverUrl ||
+            track.coverUrl ||
+            track.album?.coverUrl ||
+            track.album?.imageUrl ||
+            '';
+
+        if (!coverUrl && coverId) {
+            try {
+                coverUrl = this.api.getCoverUrl(coverId);
+            } catch {
+                coverUrl = '';
+            }
+        }
+
+        const applyCover = (selector) => {
+            const el = document.querySelector(selector);
+            if (!el || !coverUrl) return;
+
+            let img = el;
+
+            if (el.tagName === 'VIDEO') {
+                img = document.createElement('img');
+                img.className = el.className;
+                img.id = el.id;
+                img.style.cssText = el.style.cssText;
+                el.replaceWith(img);
+            }
+
+            if (img.tagName !== 'IMG') {
+                const innerImg = img.querySelector?.('img');
+
+                if (innerImg) {
+                    img = innerImg;
+                } else {
+                    return;
+                }
+            }
+
+            img.onerror = () => {
+                console.warn('[offline-cover] Broken cover:', coverUrl);
+            };
+
+            img.alt = '';
+            img.removeAttribute('srcset');
+            img.removeAttribute('sizes');
+            img.src = coverUrl;
+            img.style.objectFit = 'cover';
+        };
+
+        applyCover('.now-playing-bar .cover');
+        applyCover('#fullscreen-cover-image');
+
+        const titleEl = document.querySelector('.now-playing-bar .title');
+        const albumEl = document.querySelector('.now-playing-bar .album');
+        const artistEl = document.querySelector('.now-playing-bar .artist');
+        const totalDurationEl = document.getElementById('total-duration');
+
+        if (titleEl) {
+            titleEl.innerHTML = `${escapeHtml(trackTitle)} ${qualityBadge}`;
+        }
+
+        if (albumEl) {
+            const albumTitle = track.album?.title || '';
+
+            if (albumTitle && albumTitle !== trackTitle) {
+                albumEl.textContent = albumTitle;
+                albumEl.style.display = 'block';
+            } else {
+                albumEl.textContent = '';
+                albumEl.style.display = 'none';
+            }
+        }
+
+        if (artistEl) {
+            artistEl.innerHTML = trackArtistsHTML + yearDisplay;
+        }
+
+        if (totalDurationEl && track.duration) {
+            totalDurationEl.textContent = formatTime(track.duration);
+        }
+
+        const mixBtn = document.getElementById('now-playing-mix-btn');
+
+        if (mixBtn) {
+            mixBtn.style.display = track.mixes && track.mixes.TRACK_MIX ? 'flex' : 'none';
+        }
+
+        document.title = `${trackTitle} • ${getTrackArtists(track)}`;
+
+        this.updatePlayingTrackIndicator?.();
+
+        console.log('[offline-cover] applied:', {
+            trackId: track.id,
+            coverId,
+            coverUrl,
+            offlineCoverUri: offlineDownload?.coverUri,
+            offlineCoverPath: offlineDownload?.coverPath,
+        });
+    }
+
 }

@@ -28,6 +28,12 @@ import { partyManager } from './listening-party.js';
 import { MusicAPI } from './music-api.js';
 import { LyricsManager } from './lyrics.js';
 import { Player } from './player.js';
+import {
+    getNativeAudioStatus,
+    seekNativeAudio,
+    pauseNativeAudio,
+    resumeNativeAudio,
+} from './native-audio.js';
 
 let currentTrackIdForWaveform = null;
 
@@ -754,6 +760,7 @@ function initializeSmoothSliders(player) {
     let wasPlaying = false;
     let isAdjustingVolume = false;
     let lastSeekPosition = 0;
+    let seekDuration = 0;
 
     const seek = (bar, event, setter) => {
         const rect = bar.getBoundingClientRect();
@@ -761,50 +768,81 @@ function initializeSmoothSliders(player) {
         setter(position);
     };
 
-    const updateSeekUI = (position) => {
+    const updateSeekUI = (position, durationOverride = null) => {
         const activeEl = player.activeElement;
-        if (!isNaN(activeEl.duration)) {
+        const duration = durationOverride ?? activeEl.duration;
+
+        if (duration && !isNaN(duration)) {
             progressFill.style.width = `${position * 100}%`;
+
             if (currentTimeEl) {
-                currentTimeEl.textContent = formatTime(position * activeEl.duration);
+                currentTimeEl.textContent = formatTime(position * duration);
             }
         }
     };
 
     // Progress bar with smooth dragging
-    progressBar.addEventListener('mousedown', (e) => {
+    progressBar.addEventListener('mousedown', async (e) => {
         const activeEl = player.activeElement;
         isSeeking = true;
-        wasPlaying = !activeEl.paused;
-        if (wasPlaying) activeEl.pause();
+
+        if (player.nativeAudioActive) {
+            const status = await getNativeAudioStatus();
+            seekDuration = status.duration || player.currentTrack?.duration || 0;
+            wasPlaying = !player.nativeAudioPaused;
+
+            if (wasPlaying) {
+                await pauseNativeAudio();
+                player.nativeAudioPaused = true;
+                player.audio.dispatchEvent(new Event('pause'));
+            }
+        } else {
+            seekDuration = activeEl.duration || 0;
+            wasPlaying = !activeEl.paused;
+            if (wasPlaying) activeEl.pause();
+        }
 
         seek(progressBar, e, (position) => {
             lastSeekPosition = position;
-            updateSeekUI(position);
+            updateSeekUI(position, seekDuration);
         });
     });
 
     // Touch events for mobile
-    progressBar.addEventListener('touchstart', (e) => {
+    progressBar.addEventListener('touchstart', async (e) => {
         const activeEl = player.activeElement;
         e.preventDefault();
         isSeeking = true;
-        wasPlaying = !activeEl.paused;
-        if (wasPlaying) activeEl.pause();
+
+        if (player.nativeAudioActive) {
+            const status = await getNativeAudioStatus();
+            seekDuration = status.duration || player.currentTrack?.duration || 0;
+            wasPlaying = !player.nativeAudioPaused;
+
+            if (wasPlaying) {
+                await pauseNativeAudio();
+                player.nativeAudioPaused = true;
+                player.audio.dispatchEvent(new Event('pause'));
+            }
+        } else {
+            seekDuration = activeEl.duration || 0;
+            wasPlaying = !activeEl.paused;
+            if (wasPlaying) activeEl.pause();
+        }
 
         const touch = e.touches[0];
         const rect = progressBar.getBoundingClientRect();
         const position = Math.max(0, Math.min(1, (touch.clientX - rect.left) / rect.width));
 
         lastSeekPosition = position;
-        updateSeekUI(position);
+        updateSeekUI(position, seekDuration);
     });
 
     document.addEventListener('mousemove', (e) => {
         if (isSeeking) {
             seek(progressBar, e, (position) => {
                 lastSeekPosition = position;
-                updateSeekUI(position);
+                updateSeekUI(position, seekDuration);
             });
         }
 
@@ -832,7 +870,7 @@ function initializeSmoothSliders(player) {
             const position = Math.max(0, Math.min(1, (touch.clientX - rect.left) / rect.width));
 
             lastSeekPosition = position;
-            updateSeekUI(position);
+            updateSeekUI(position, seekDuration);
         }
 
         if (isAdjustingVolume) {
@@ -853,15 +891,32 @@ function initializeSmoothSliders(player) {
         }
     });
 
-    document.addEventListener('mouseup', () => {
+    document.addEventListener('mouseup', async () => {
         if (isSeeking) {
             const activeEl = player.activeElement;
-            // Commit the seek
-            if (!isNaN(activeEl.duration)) {
+
+            if (player.nativeAudioActive) {
+                const status = await getNativeAudioStatus();
+                const duration = status.duration || seekDuration || player.currentTrack?.duration || 0;
+
+                if (duration && !isNaN(duration)) {
+                    const targetTime = lastSeekPosition * duration;
+
+                    await seekNativeAudio(targetTime);
+
+                    if (wasPlaying) {
+                        await resumeNativeAudio();
+                        player.nativeAudioPaused = false;
+                        player.audio.dispatchEvent(new Event('play'));
+                        player.audio.dispatchEvent(new Event('playing'));
+                    }
+                }
+            } else if (!isNaN(activeEl.duration)) {
                 activeEl.currentTime = lastSeekPosition * activeEl.duration;
                 player.updateMediaSessionPositionState();
                 if (wasPlaying) activeEl.play();
             }
+
             isSeeking = false;
         }
 
@@ -870,14 +925,32 @@ function initializeSmoothSliders(player) {
         }
     });
 
-    document.addEventListener('touchend', () => {
+    document.addEventListener('touchend', async () => {
         if (isSeeking) {
             const activeEl = player.activeElement;
-            if (!isNaN(activeEl.duration)) {
+
+            if (player.nativeAudioActive) {
+                const status = await getNativeAudioStatus();
+                const duration = status.duration || seekDuration || player.currentTrack?.duration || 0;
+
+                if (duration && !isNaN(duration)) {
+                    const targetTime = lastSeekPosition * duration;
+
+                    await seekNativeAudio(targetTime);
+
+                    if (wasPlaying) {
+                        await resumeNativeAudio();
+                        player.nativeAudioPaused = false;
+                        player.audio.dispatchEvent(new Event('play'));
+                        player.audio.dispatchEvent(new Event('playing'));
+                    }
+                }
+            } else if (!isNaN(activeEl.duration)) {
                 activeEl.currentTime = lastSeekPosition * activeEl.duration;
                 player.updateMediaSessionPositionState();
                 if (wasPlaying) activeEl.play();
             }
+
             isSeeking = false;
         }
 
