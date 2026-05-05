@@ -99,7 +99,7 @@
  -  fixes
  - updateMediaSession covert art for offline
      -  - covert art for offline in app controler
-- Installation guid for android
+### Installation guid for android
 1. make sure that you have [Android Studio](https://developer.android.com/studio) installed
 2. go to the root directory of the project
 3. `bun install`
