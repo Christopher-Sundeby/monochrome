@@ -106,7 +106,7 @@
 4. `bun build`
 5. `bunx cap sync android`
 6. `bunx cap open android`
-7. connecte your android divice with USB Debugging on and click run
+7. connecte your Android divice with USB Debugging on and click run on Android Studio
 
 ###### disclaimer all the featers that I have added are vide codded it's juste that it works greate for me and I wanted to share it with you and It's is not very well optimised but it should not cause any problems
 ###### feel free to make comits to add new featurs or to fix bugges 
